@@ -32,6 +32,8 @@ STATIC = {
     "/websearch.css": ("websearch.css", "text/css; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
     "/worker.js": ("worker.js", "text/javascript; charset=utf-8"),
+    "/models.js": ("models.js", "text/javascript; charset=utf-8"),
+    "/models.css": ("models.css", "text/css; charset=utf-8"),
 }
 # Aggregate limits for this single server process, not per-user limits.
 SEARCHES_PER_MINUTE = 20
@@ -179,7 +181,7 @@ class Handler(BaseHTTPRequestHandler):
         path = urlsplit(self.path).path
         if path == "/healthz":
             return self.send_json(200, {"ok": True, "inference": "browser",
-                                       "version": "websearch-v1"})
+                                       "version": "models-v1"})
         if path not in STATIC:
             return self.fail(404, "Not found")
         filename, mime = STATIC[path]
@@ -244,7 +246,7 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     check_backend()
     with ThreadingHTTPServer(("127.0.0.1", PORT), Handler) as server:
-        print(f"Browser LLM Lab: http://127.0.0.1:{PORT} / websearch-v1", flush=True)
+        print(f"Browser LLM Lab: http://127.0.0.1:{PORT} / models-v1", flush=True)
         try:
             server.serve_forever()
         except KeyboardInterrupt:

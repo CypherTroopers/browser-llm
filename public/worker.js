@@ -1,93 +1,193 @@
-// Inference stays in this browser Worker. No search requests originate here.
-const LIBRARY = "https://esm.run/@mlc-ai/web-llm@0.2.85";
-let engine;
-let busy = false;
+// Inference stays in this Worker. Search requests still originate only in app.js.
+import {
+  LIBRARY, CONTEXT, makeCatalog, resolveModel, problem, adaptMessages,
+  generationOptions, splitAnswer, modelBaseURL, manifestBytes, errorDetails,
+} from "./models.js?v=models-v1";
 
-self.onmessage = async ({ data: { id, type, data } }) => {
-  const send = (kind, value) => self.postMessage({ id, kind, value });
-  if (busy) return send("error", "Another task is already running.");
-  busy = true;
-  try {
-    if (type === "load") {
-      if (!["0.5B", "1.5B", "3B"].includes(data.size)) {
-        throw new Error("This model is not allowed.");
-      }
-      if (!self.isSecureContext || !navigator.gpu) {
-        throw new Error("WebGPU is not available in this Worker.");
-      }
-      const adapter = await navigator.gpu.requestAdapter();
-      if (!adapter) throw new Error("Unable to obtain a WebGPU adapter.");
-      const quant = adapter.features.has("shader-f16") ? "q4f16_1" : "q4f32_1";
-      const model = `Qwen2.5-${data.size}-Instruct-${quant}-MLC`;
-      send("progress", { progress: 0, text: "Loading WebLLM..." });
-      const webllm = await import(LIBRARY);
-      const record = webllm.prebuiltAppConfig.model_list.find(m => m.model_id === model);
-      if (!record) throw new Error(`Model is not registered: ${model}`);
-      for (const feature of record.required_features ?? []) {
-        if (!adapter.features.has(feature)) throw new Error(`Missing GPU feature: ${feature}`);
-      }
-      if (record.buffer_size_required_bytes > adapter.limits.maxStorageBufferBindingSize) {
-        throw new Error("The GPU buffer limit is too small for this model.");
-      }
-      engine = new webllm.MLCEngine({
-        initProgressCallback: report => send("progress", report),
-        logLevel: "WARN",
-      });
-      await engine.reload(model, { context_window_size: 4096 });
-      send("result", { model });
-    } else if (type === "benchmark") {
-      if (!engine) throw new Error("No model is loaded.");
-      const messages = [{ role: "user", content: "Explain how computers work in detail." }];
-      await engine.resetChat();
-      await engine.chat.completions.create({
-        messages, temperature: 0, max_tokens: 8, ignore_eos: true,
-      });
-      await engine.resetChat();
-      const start = performance.now();
-      const reply = await engine.chat.completions.create({
-        messages, temperature: 0, max_tokens: 32, ignore_eos: true,
-      });
-      const seconds = (performance.now() - start) / 1000;
-      const tokens = reply.usage?.completion_tokens;
-      if (!(tokens > 0 && seconds > 0)) throw new Error("Unable to measure speed.");
-      await engine.resetChat();
-      send("result", {
-        tokens, seconds, score: tokens / seconds,
-        decode: reply.usage?.extra?.decode_tokens_per_s ?? null,
-      });
-    } else if (type === "chat") {
-      if (!engine) throw new Error("No model is loaded.");
-      // Conservative byte guard for the selected Qwen models, not a tokenizer.
-      if (!Array.isArray(data.messages) || data.messages.length > 8 ||
-          new TextEncoder().encode(JSON.stringify(data.messages)).length > 3000) {
-        throw new Error("Input is too large for this prototype.");
-      }
-      await engine.resetChat();
-      let text = "", usage = null, finish = "";
-      const start = performance.now();
-      const chunks = await engine.chat.completions.create({
-        messages: data.messages, stream: true,
-        stream_options: { include_usage: true },
-        max_tokens: 256, temperature: data.web ? 0.1 : 0.6,
-      });
-      for await (const chunk of chunks) {
-        const delta = chunk.choices[0]?.delta?.content ?? "";
-        text += delta;
-        if (delta) send("delta", delta);
-        if (chunk.usage) usage = chunk.usage;
-        finish = chunk.choices[0]?.finish_reason || finish;
-      }
-      send("result", { text, usage, finish, seconds: (performance.now() - start) / 1000 });
-    } else if (type === "unload") {
-      if (engine) await engine.unload();
-      engine = undefined;
-      send("result", null);
-    } else {
-      throw new Error("Unknown operation.");
-    }
-  } catch (error) {
-    send("error", error instanceof Error ? error.message : String(error));
-  } finally {
-    busy = false;
-  }
+export async function readGPU() {
+  if (!globalThis.isSecureContext || !globalThis.navigator?.gpu)
+    throw problem("COMPATIBILITY", "WebGPU is not available in this secure Worker.");
+  const adapter = await navigator.gpu.requestAdapter();
+  if (!adapter) throw problem("COMPATIBILITY", "Unable to obtain a WebGPU adapter.");
+  const info = adapter.info || {};
+  return {
+    features: [...adapter.features].sort(),
+    maxBufferSize: adapter.limits.maxBufferSize,
+    maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+    vendor: info.vendor || "", architecture: info.architecture || "",
+    // Buffer limits are not free VRAM. No large allocation probe is performed.
+  };
+}
+
+const median = values => {
+  const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
+  if (!sorted.length) return null;
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
 };
+
+// Dependencies are injectable so the state machine can be tested without downloading weights.
+export function createRuntime({
+  loadLibrary = () => import(LIBRARY), readDevice = readGPU,
+  fetcher = (...args) => fetch(...args), now = () => performance.now(),
+  estimate = () => globalThis.navigator?.storage?.estimate?.(),
+} = {}) {
+  let imported, engine, current;
+  async function library() {
+    if (!imported) {
+      try { imported = await loadLibrary(); }
+      catch (error) { throw problem("NETWORK", `Could not load WebLLM 0.2.85: ${error.message}`); }
+    }
+    return imported;
+  }
+  async function selection(modelId) {
+    const webllm = await library();
+    return { webllm, ...resolveModel(modelId, webllm.prebuiltAppConfig.model_list, await readDevice()) };
+  }
+  function requireEngine() {
+    if (!engine || !current) throw problem("NOT_LOADED", "No model is loaded. Press Start.");
+  }
+  async function measure(messages, profile, tokens) {
+    await engine.resetChat();
+    const start = now();
+    let firstTokenMs = null, usage;
+    const chunks = await engine.chat.completions.create({
+      ...generationOptions(profile), messages: adaptMessages(messages, profile),
+      stream: true, stream_options: { include_usage: true }, max_tokens: tokens, ignore_eos: true,
+    });
+    for await (const chunk of chunks) {
+      if (firstTokenMs === null && chunk.choices?.[0]?.delta?.content) firstTokenMs = now() - start;
+      if (chunk.usage) usage = chunk.usage;
+    }
+    const seconds = (now() - start) / 1000;
+    const count = usage?.completion_tokens;
+    if (!Number.isFinite(count) || count <= 0 || seconds <= 0 || firstTokenMs === null)
+      throw problem("BENCHMARK", "The runtime did not return valid benchmark measurements.");
+    return { tokens: count, seconds, score: count / seconds, firstTokenMs,
+      decode: usage?.extra?.decode_tokens_per_s ?? null, promptTokens: usage?.prompt_tokens ?? null };
+  }
+  return {
+    async dispatch(type, data = {}, send = () => {}) {
+      if (type === "probe") {
+        const device = await readDevice();
+        const webllm = await library();
+        return { device, catalog: makeCatalog(webllm.prebuiltAppConfig.model_list, device) };
+      }
+      if (type === "inspect") {
+        const { webllm, record } = await selection(data.modelId);
+        let cached = null, weightsBytes = null, disk = null;
+        try { cached = await webllm.hasModelInCache(data.modelId, webllm.prebuiltAppConfig); } catch { /* unknown */ }
+        try { disk = await estimate(); } catch { /* storage API may be unavailable */ }
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 15000);
+        try {
+          const response = await fetcher(new URL("ndarray-cache.json", modelBaseURL(record.model)), {
+            signal: controller.signal, credentials: "omit", referrerPolicy: "no-referrer",
+          });
+          if (!response.ok) throw new Error(`Manifest HTTP ${response.status}`);
+          // Only the small manifest is fetched; model weight shards are not downloaded here.
+          const text = await response.text();
+          if (text.length > 8_000_000) throw new Error("Oversized model manifest.");
+          weightsBytes = manifestBytes(JSON.parse(text));
+        } catch { /* Show unknown size; do not confuse a metadata fetch failure with GPU failure. */ }
+        finally { clearTimeout(timeout); }
+        return { cached, weightsBytes, disk, context: CONTEXT };
+      }
+      if (type === "load") {
+        if (engine) throw problem("STATE", "Unload the existing model before loading another one.");
+        const { webllm, profile, record } = await selection(data.modelId);
+        send("progress", { progress: 0, text: `Loading ${data.modelId}...` });
+        engine = new webllm.MLCEngine({
+          initProgressCallback: report => send("progress", report), logLevel: "WARN",
+        });
+        // Preserve upstream overrides, including Qwen3.5 max_history_size and Mistral settings.
+        // Only recorded 4096-token variants are allowed by resolveModel().
+        await engine.reload(data.modelId);
+        current = { profile, modelId: data.modelId };
+        return { model: data.modelId, context: CONTEXT, outputTokens: profile.outputTokens,
+          inputBytes: profile.inputBytes, vramMB: record.vram_required_MB ?? null };
+      }
+      if (type === "benchmark") {
+        requireEngine();
+        const profile = current.profile;
+        await engine.resetChat();
+        await engine.chat.completions.create({
+          ...generationOptions(profile),
+          messages: [{ role: "user", content: "Give a short explanation of browser computing." }],
+          max_tokens: 8, ignore_eos: true,
+        });
+        const language = data.language === "ja" ? "Japanese" : "English";
+        const messages = [
+          { role: "system", content: `Answer in ${language}. Explain supplied evidence and cite [1] and [2]. Do not invent facts.` },
+          { role: "user", content:
+            "Explain local browser inference and why GPU limits alone cannot establish that a model will fit. " +
+            "Use only these synthetic reference notes, not outside facts.\n" +
+            "[1] In this example, a browser loads a model into a Worker and generates answers locally. " +
+            "Downloading model files uses network bandwidth and persistent cache storage. " +
+            "Model loading and token generation are distinct operations.\n" +
+            "[2] In this example, reported buffer limits constrain individual buffers, not available total GPU memory. " +
+            "Other applications and the operating system also use resources. A short benchmark is useful " +
+            "but does not guarantee stability under every future workload." },
+        ];
+        const runs = [];
+        for (let i = 0; i < 2; i++) {
+          send("progress", { progress: (i + 1) / 3, text: `Benchmark ${i + 1}/2: 64 tokens with reference material...` });
+          runs.push(await measure(messages, profile, 64));
+        }
+        await engine.resetChat();
+        return { score: median(runs.map(r => r.score)), decode: median(runs.map(r => r.decode)),
+          firstTokenMs: median(runs.map(r => r.firstTokenMs)), tokens: runs.reduce((n, r) => n + r.tokens, 0),
+          seconds: runs.reduce((n, r) => n + r.seconds, 0), runs };
+      }
+      if (type === "chat") {
+        requireEngine();
+        const profile = current.profile;
+        const messages = adaptMessages(data.messages, profile);
+        await engine.resetChat();
+        let raw = "", usage = null, finish = "";
+        const start = now();
+        const chunks = await engine.chat.completions.create({
+          ...generationOptions(profile, !!data.web), messages, stream: true,
+          stream_options: { include_usage: true },
+        });
+        for await (const chunk of chunks) {
+          const delta = chunk.choices?.[0]?.delta?.content ?? "";
+          raw += delta;
+          if (delta) send("delta", delta);
+          if (chunk.usage) usage = chunk.usage;
+          finish = chunk.choices?.[0]?.finish_reason || finish;
+        }
+        return { ...splitAnswer(raw, profile), usage, finish, outputTokens: profile.outputTokens,
+          seconds: (now() - start) / 1000 };
+      }
+      if (type === "health") {
+        requireEngine();
+        await engine.resetChat();
+        return { model: current.modelId }; // Worker/engine state check, not a full GPU stress test.
+      }
+      if (type === "unload") {
+        const old = engine;
+        engine = undefined;
+        current = undefined;
+        if (old) await old.unload();
+        return null;
+      }
+      throw problem("INPUT", "Unknown Worker operation.");
+    },
+  };
+}
+
+if (typeof self !== "undefined" && typeof self.postMessage === "function") {
+  const runtime = createRuntime();
+  let busy = false;
+  self.onmessage = async event => {
+    const { id, type, data } = event.data || {};
+    if (!Number.isSafeInteger(id) || typeof type !== "string") return;
+    const send = (kind, value) => self.postMessage({ id, kind, value });
+    if (busy) return send("error", { code: "BUSY", stage: type, message: "Another task is running." });
+    busy = true;
+    try { send("result", await runtime.dispatch(type, data, send)); }
+    catch (error) { send("error", errorDetails(error, type)); }
+    finally { busy = false; }
+  };
+}

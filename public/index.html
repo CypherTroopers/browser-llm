@@ -6,6 +6,7 @@
   <title>Browser LLM Lab - Chat</title>
   <link rel="stylesheet" href="/style.css?v=chat-v3">
   <link rel="stylesheet" href="/websearch.css?v=chat-v3">
+  <link rel="stylesheet" href="/models.css?v=models-v1">
 </head>
 <body>
 <main>
@@ -16,26 +17,36 @@
   <details id="modelPanel" open>
     <summary>Model settings</summary>
     <pre id="device">Checking device capabilities...</pre>
-    <div class="row">
-      <label>Selection Mode
-        <select id="mode">
-          <option value="auto">Auto: select by benchmark</option>
-          <option value="0.5B">Qwen2.5 / 0.5B</option>
-          <option value="1.5B">Qwen2.5 / 1.5B</option>
-          <option value="3B">Qwen2.5 / 3B</option>
+    <div class="row model-settings">
+      <label>Model
+        <select id="mode"><option value="auto">Auto: loading catalog...</option></select>
+      </label>
+      <label>Auto memory-estimate ceiling
+        <select id="cap">
+          <option value="600">600 MB (very limited)</option>
+          <option value="1200" selected>1,200 MB (conservative default)</option>
+          <option value="2200">2,200 MB</option>
+          <option value="3500">3,500 MB</option>
+          <option value="6500">6,500 MB (large desktop models)</option>
         </select>
       </label>
-      <label>Auto Model Limit
-        <select id="cap">
-          <option value="1.5B">Up to 1.5B</option>
-          <option value="3B">Up to 3B (more memory)</option>
+      <label>Answer language
+        <select id="answerLanguage">
+          <option value="en">English</option>
+          <option value="ja">Japanese</option>
+          <option value="auto">Follow the question</option>
         </select>
       </label>
     </div>
-    <p class="notice">Initial model downloads are large. Wi-Fi is recommended.
-      Auto may download multiple models. Context: 4,096 tokens. Loading a model clears the chat.</p>
+    <pre id="modelInfo">Preparing model catalog...</pre>
+    <a id="modelCard" class="notice" target="_blank" rel="noopener noreferrer" hidden>Model card and license</a>
+    <p class="notice">The ceiling is a filtering preference, not measured free GPU memory.
+      Start checks metadata, asks for confirmation, then loads ONE model and benchmarks it.
+      Context: 4,096 tokens. Model downloads can be large; Wi-Fi is recommended.
+      Measurements stay in this browser. Manual experimental models are excluded from Auto.</p>
     <div class="row">
       <button id="start" type="button" disabled>Download Model &amp; Start</button>
+      <button id="forgetProfile" type="button" class="secondary">Forget measurements</button>
       <button id="reset" type="button" class="secondary">Stop &amp; Reset</button>
     </div>
     <progress id="progress" max="1" value="0"></progress>
@@ -82,9 +93,9 @@
     </form>
   </section>
   <details><summary>Diagnostic Log</summary><pre id="log"></pre></details>
-  <footer>WebLLM 0.2.85 / Qwen2.5 / chat-v3 - Experimental.
-    Output: 256 tokens. Up to 3 recent exchanges are considered within the input budget.</footer>
+  <footer>WebLLM 0.2.85 / models-v1 - Experimental.
+    Output budget depends on the model; reasoning uses the same output budget. Up to 3 recent exchanges are considered within the input budget.</footer>
 </main>
-<script type="module" src="/app.js?v=chat-v3"></script>
+<script type="module" src="/app.js?v=models-v1"></script>
 </body>
 </html>
