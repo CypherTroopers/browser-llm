@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>Browser LLM Lab - Chat</title>
+  <link rel="stylesheet" href="/style.css?v=chat-v3">
+  <link rel="stylesheet" href="/websearch.css?v=chat-v3">
+</head>
+<body>
+<main>
+  <header>
+    <small>LOCAL AI / WEB SEARCH</small>
+    <h1>Browser LLM Lab</h1>
+  </header>
+  <details id="modelPanel" open>
+    <summary>Model settings</summary>
+    <pre id="device">Checking device capabilities...</pre>
+    <div class="row">
+      <label>Selection Mode
+        <select id="mode">
+          <option value="auto">Auto: select by benchmark</option>
+          <option value="0.5B">Qwen2.5 / 0.5B</option>
+          <option value="1.5B">Qwen2.5 / 1.5B</option>
+          <option value="3B">Qwen2.5 / 3B</option>
+        </select>
+      </label>
+      <label>Auto Model Limit
+        <select id="cap">
+          <option value="1.5B">Up to 1.5B</option>
+          <option value="3B">Up to 3B (more memory)</option>
+        </select>
+      </label>
+    </div>
+    <p class="notice">Initial model downloads are large. Wi-Fi is recommended.
+      Auto may download multiple models. Context: 4,096 tokens. Loading a model clears the chat.</p>
+    <div class="row">
+      <button id="start" type="button" disabled>Download Model &amp; Start</button>
+      <button id="reset" type="button" class="secondary">Stop &amp; Reset</button>
+    </div>
+    <progress id="progress" max="1" value="0"></progress>
+    <p id="selected">Model: not selected</p>
+    <pre id="metrics">Speed: not measured</pre>
+  </details>
+  <details id="searchPanel">
+    <summary>Search options &amp; privacy</summary>
+    <p class="notice">Every Send searches the web, then generates a local AI answer.
+      The current question, or custom search terms, is sent to this server and external search engines.
+      Do not submit secrets. Chat history is used locally, not sent as search context.</p>
+    <label>Search terms (optional; otherwise your current question is searched)
+      <input id="searchQuery" type="text" maxlength="400"
+        placeholder="Example: site:developer.mozilla.org WebGPU">
+    </label>
+    <label>Time range
+      <select id="timeRange">
+        <option value="">Any time</option>
+        <option value="day">Past day</option>
+        <option value="month">Past month</option>
+        <option value="year">Past year</option>
+      </select>
+    </label>
+    <p class="notice">Sources are search snippets, not full articles. Date filters depend on the engine.
+      A new search does not guarantee current or correct information.
+      For follow-ups, include the topic in the question or specify search terms here.</p>
+  </details>
+  <section id="chatPanel" aria-label="Web chat">
+    <div class="chat-toolbar">
+      <strong>Chat <span>Web search on every send</span></strong>
+      <button id="latest" type="button" class="secondary" hidden>Latest &#8595;</button>
+    </div>
+    <p id="status" role="status">Preparing...</p>
+    <div id="chat" role="log" aria-label="Conversation" aria-live="polite" tabindex="0"></div>
+    <form id="form">
+      <label for="prompt">Message</label>
+      <textarea id="prompt" rows="2" maxlength="400" disabled
+        placeholder="Ask a question..."></textarea>
+      <div class="row">
+        <button id="send" type="submit" disabled>Send</button>
+        <button id="clear" type="button" class="secondary">Clear</button>
+      </div>
+      <p class="notice">Send shares search terms externally. Max 400 characters / 1,200 UTF-8 bytes.</p>
+    </form>
+  </section>
+  <details><summary>Diagnostic Log</summary><pre id="log"></pre></details>
+  <footer>WebLLM 0.2.85 / Qwen2.5 / chat-v3 - Experimental.
+    Output: 256 tokens. Up to 3 recent exchanges are considered within the input budget.</footer>
+</main>
+<script type="module" src="/app.js?v=chat-v3"></script>
+</body>
+</html>
